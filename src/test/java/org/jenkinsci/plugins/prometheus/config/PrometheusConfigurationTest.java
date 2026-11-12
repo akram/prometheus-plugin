@@ -1,63 +1,68 @@
 package org.jenkinsci.plugins.prometheus.config;
 
 import hudson.model.Descriptor;
-import junitparams.JUnitParamsRunner;
-import junitparams.Parameters;
+import hudson.util.FormValidation;
 import net.sf.json.JSONObject;
-import org.junit.Before;
-import org.junit.Test;
-import org.junit.runner.RunWith;
-import org.kohsuke.stapler.StaplerRequest;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.MethodSource;
+import org.kohsuke.stapler.StaplerRequest2;
 import org.mockito.Mockito;
 
 import java.util.Arrays;
 import java.util.List;
 
 import static com.github.stefanbirkner.systemlambda.SystemLambda.withEnvironmentVariable;
-import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyBoolean;
+import static org.mockito.ArgumentMatchers.anyLong;
 
-@RunWith(JUnitParamsRunner.class)
+@SuppressWarnings("rawtypes")
 public class PrometheusConfigurationTest {
 
-    private PrometheusConfiguration configuration;
+    private final PrometheusConfiguration configuration;
 
-    @Before
-    public void setup() {
-        configuration = Mockito.mock(PrometheusConfiguration.class);
+    public PrometheusConfigurationTest() {
+        this.configuration = Mockito.mock(PrometheusConfiguration.class);
         Mockito.doNothing().when((Descriptor) configuration).load();
     }
 
-    private List<String> wrongMetricCollectorPeriodsProvider() {
+    private static List<String> wrongMetricCollectorPeriodsProvider() {
         return Arrays.asList("0", "-1", "test", null, "100L");
     }
 
-    @Test
-    @Parameters(method = "wrongMetricCollectorPeriodsProvider")
+    @ParameterizedTest
+    @MethodSource("wrongMetricCollectorPeriodsProvider")
     public void shouldGetErrorWhenNotPositiveNumber(String metricCollectorPeriod) throws Descriptor.FormException {
         //given
-        Mockito.when(configuration.configure(any(), any())).thenCallRealMethod();
+        Mockito.when(configuration.configure(any(StaplerRequest2.class), any())).thenCallRealMethod();
+        Mockito.when(configuration.doCheckCollectingMetricsPeriodInSeconds(any())).thenCallRealMethod();
         JSONObject config = getDefaultConfig();
         config.accumulate("collectingMetricsPeriodInSeconds", metricCollectorPeriod);
 
-        // when
-        assertThatThrownBy(() -> configuration.configure(null, config))
-                .isInstanceOf(Descriptor.FormException.class)
-                .hasMessageContaining("CollectingMetricsPeriodInSeconds must be a positive integer");
+
+        FormValidation formValidation = configuration.doCheckCollectingMetricsPeriodInSeconds(metricCollectorPeriod);
+
+
+        assertEquals(formValidation.kind, FormValidation.Kind.ERROR);
+        assertEquals(formValidation.getMessage(), "CollectingMetricsPeriodInSeconds must be a positive value");
     }
 
-    private List<String> correctMetricCollectorPeriodsProvider() {
+    private static List<String> correctMetricCollectorPeriodsProvider() {
         return Arrays.asList("1", "100", "5.7", String.valueOf(Integer.MAX_VALUE));
     }
 
-    @Test
-    @Parameters(method = "correctMetricCollectorPeriodsProvider")
+    @ParameterizedTest
+    @MethodSource("correctMetricCollectorPeriodsProvider")
     public void shouldReturnOk(String metricCollectorPeriod) throws Descriptor.FormException {
         //given
-        Mockito.when(configuration.configure(any(), any())).thenCallRealMethod();
+        Mockito.when(configuration.configure(any(StaplerRequest2.class), any())).thenCallRealMethod();
+        Mockito.when(configuration.doCheckCollectingMetricsPeriodInSeconds(any())).thenCallRealMethod();
         JSONObject config = getDefaultConfig();
-        StaplerRequest request = Mockito.mock(StaplerRequest.class);
+        StaplerRequest2 request = Mockito.mock(StaplerRequest2.class);
         Mockito.doNothing().when(request).bindJSON(any(Object.class), any(JSONObject.class));
         config.accumulate("collectingMetricsPeriodInSeconds", metricCollectorPeriod);
 
@@ -65,30 +70,30 @@ public class PrometheusConfigurationTest {
         boolean actual = configuration.configure(request, config);
 
         // then
-        assertThat(actual).isTrue();
+        assertTrue(actual);
     }
 
     @Test
     public void shouldSetDefaultValue() {
         // given
-        Mockito.doCallRealMethod().when(configuration).setCollectingMetricsPeriodInSeconds(any());
+        Mockito.doCallRealMethod().when(configuration).setCollectingMetricsPeriodInSeconds(anyLong());
         Mockito.when(configuration.getCollectingMetricsPeriodInSeconds()).thenCallRealMethod();
-        Long metricCollectorPeriod = null;
+        long metricCollectorPeriod = -1L;
 
         // when
         configuration.setCollectingMetricsPeriodInSeconds(metricCollectorPeriod);
         long actual = configuration.getCollectingMetricsPeriodInSeconds();
 
         // then
-        assertThat(actual).isEqualTo(PrometheusConfiguration.DEFAULT_COLLECTING_METRICS_PERIOD_IN_SECONDS);
+        assertEquals(actual, PrometheusConfiguration.DEFAULT_COLLECTING_METRICS_PERIOD_IN_SECONDS);
     }
 
     @Test
-    public void shouldSetValueFromEnvForCollectingMetricsPeriodInSeconds() throws Exception{
+    public void shouldSetValueFromEnvForCollectingMetricsPeriodInSeconds() throws Exception {
         // given
-        Mockito.doCallRealMethod().when(configuration).setCollectingMetricsPeriodInSeconds(any());
+        Mockito.doCallRealMethod().when(configuration).setCollectingMetricsPeriodInSeconds(anyLong());
         Mockito.when(configuration.getCollectingMetricsPeriodInSeconds()).thenCallRealMethod();
-        Long metricCollectorPeriod = null;
+        long metricCollectorPeriod = -1L;
 
         // when
         withEnvironmentVariable(PrometheusConfiguration.COLLECTING_METRICS_PERIOD_IN_SECONDS, "1000")
@@ -96,32 +101,16 @@ public class PrometheusConfigurationTest {
         long actual = configuration.getCollectingMetricsPeriodInSeconds();
 
         // then
-        assertThat(actual).isEqualTo(1000);
+        assertEquals(actual, 1000);
     }
 
-    @Test
-    public void shouldSetValueFromEnvForCollectDiskUsage() throws Exception{
+    @ParameterizedTest
+    @MethodSource("wrongMetricCollectorPeriodsProvider")
+    public void shouldSetDefaultValueWhenEnvCannotBeConvertedToLongOrNegativeValue(String wrongValue) throws Exception {
         // given
-        Mockito.doCallRealMethod().when(configuration).setCollectDiskUsage(any());
-        Mockito.when(configuration.getCollectDiskUsage()).thenCallRealMethod();
-        Boolean collectDiskUsage = null;
-
-        // when
-        withEnvironmentVariable(String.valueOf(PrometheusConfiguration.DEFAULT_COLLECT_DISK_USAGE), String.valueOf(true))
-                .execute(() -> configuration.setCollectDiskUsage(collectDiskUsage));
-        boolean actual = configuration.getCollectDiskUsage();
-
-        // then
-        assertThat(actual).isEqualTo(true);
-    }
-
-    @Test
-    @Parameters(method = "wrongMetricCollectorPeriodsProvider")
-    public void shouldSetDefaultValueWhenEnvCannotBeConvertedToLongORNegativeValue(String wrongValue) throws Exception {
-        // given
-        Mockito.doCallRealMethod().when(configuration).setCollectingMetricsPeriodInSeconds(any());
+        Mockito.doCallRealMethod().when(configuration).setCollectingMetricsPeriodInSeconds(anyLong());
         Mockito.when(configuration.getCollectingMetricsPeriodInSeconds()).thenCallRealMethod();
-        Long metricCollectorPeriod = null;
+        long metricCollectorPeriod = -1L;
 
         // when
         withEnvironmentVariable(PrometheusConfiguration.COLLECTING_METRICS_PERIOD_IN_SECONDS, wrongValue)
@@ -129,7 +118,84 @@ public class PrometheusConfigurationTest {
         long actual = configuration.getCollectingMetricsPeriodInSeconds();
 
         // then
-        assertThat(actual).isEqualTo(PrometheusConfiguration.DEFAULT_COLLECTING_METRICS_PERIOD_IN_SECONDS);
+        assertEquals(actual, PrometheusConfiguration.DEFAULT_COLLECTING_METRICS_PERIOD_IN_SECONDS);
+    }
+
+    @Test
+    public void shouldTakeDefaultValueWhenNothingConfigured() {
+        Mockito.doCallRealMethod().when(configuration).setCollectDiskUsageBasedOnEnvironmentVariableIfDefined();
+        Mockito.doCallRealMethod().when(configuration).getCollectDiskUsage();
+
+        // simulate constructor call
+        configuration.setCollectDiskUsageBasedOnEnvironmentVariableIfDefined();
+
+
+        assertFalse(configuration.getCollectDiskUsage());
+    }
+
+    @Test
+    public void shouldTakeEnvironmentVariableWhenNothingConfigured() throws Exception {
+        Mockito.doCallRealMethod().when(configuration).setCollectDiskUsageBasedOnEnvironmentVariableIfDefined();
+        Mockito.doCallRealMethod().when(configuration).getCollectDiskUsage();
+
+        // simulate constructor call
+        withEnvironmentVariable(PrometheusConfiguration.COLLECT_DISK_USAGE, "false")
+                .execute(configuration::setCollectDiskUsageBasedOnEnvironmentVariableIfDefined);
+
+        assertFalse(configuration.getCollectDiskUsage());
+    }
+
+    @Test
+    public void shouldTakeDefaultIfEnvironmentVariableIsFaulty() throws Exception {
+        Mockito.doCallRealMethod().when(configuration).setCollectDiskUsageBasedOnEnvironmentVariableIfDefined();
+        Mockito.doCallRealMethod().when(configuration).getCollectDiskUsage();
+
+        // simulate constructor call
+        withEnvironmentVariable(PrometheusConfiguration.COLLECT_DISK_USAGE, "not_true_not_false")
+                .execute(configuration::setCollectDiskUsageBasedOnEnvironmentVariableIfDefined);
+
+        assertFalse(configuration.getCollectDiskUsage());
+    }
+
+    @Test
+    public void shouldTakeConfiguredValueIfEnvironmentVariableIsFaulty() throws Exception {
+        Mockito.doCallRealMethod().when(configuration).setCollectDiskUsageBasedOnEnvironmentVariableIfDefined();
+        Mockito.doCallRealMethod().when(configuration).getCollectDiskUsage();
+        Mockito.doCallRealMethod().when(configuration).setCollectDiskUsage(anyBoolean());
+
+        withEnvironmentVariable(PrometheusConfiguration.COLLECT_DISK_USAGE, "not_true_not_false")
+                .execute(() -> {
+
+                    // simulate user clicked on checkbox
+                    configuration.setCollectDiskUsage(true);
+
+                    // simulate constructor call
+                    configuration.setCollectDiskUsageBasedOnEnvironmentVariableIfDefined();
+                });
+
+        assertTrue(configuration.getCollectDiskUsage());
+    }
+
+    @Test
+    public void shouldTakeConfiguredValueIfItIsConfigured() {
+        Mockito.doCallRealMethod().when(configuration).setCollectDiskUsage(anyBoolean());
+        Mockito.doCallRealMethod().when(configuration).getCollectDiskUsage();
+
+        // simulate someone configured it over the UI
+        configuration.setCollectDiskUsage(false);
+        assertFalse(configuration.getCollectDiskUsage());
+
+        // simulate constructor call
+        configuration.setCollectDiskUsageBasedOnEnvironmentVariableIfDefined();
+        assertFalse(configuration.getCollectDiskUsage());
+
+        // simulate someone configured it over the UI
+        configuration.setCollectDiskUsage(true);
+        assertTrue(configuration.getCollectDiskUsage());
+
+        // simulate constructor call
+        configuration.setCollectDiskUsageBasedOnEnvironmentVariableIfDefined();
+        assertTrue(configuration.getCollectDiskUsage());
     }
 
     private JSONObject getDefaultConfig() {
@@ -149,7 +215,63 @@ public class PrometheusConfigurationTest {
         config.accumulate("appendStatusLabel", "false");
         config.accumulate("labeledBuildParameterNames", "");
         config.accumulate("collectDiskUsage", "true");
+        config.accumulate("collectNodeStatus", "true");
+        config.accumulate("perBuildMetrics", "false");
+        config.accumulate("perBuildMetricsMaxAgeInHours", "0");
+        config.accumulate("perBuildMetricsMaxBuilds", "0");
         return config;
+    }
+
+    @Test
+    public void shouldSetPerBuildMetricsMaxAgeInHours() {
+        // given
+        Mockito.doCallRealMethod().when(configuration).setPerBuildMetricsMaxAgeInHours(Mockito.anyLong());
+        Mockito.when(configuration.getPerBuildMetricsMaxAgeInHours()).thenCallRealMethod();
+
+        // when
+        configuration.setPerBuildMetricsMaxAgeInHours(24L);
+
+        // then
+        assertEquals(24L, configuration.getPerBuildMetricsMaxAgeInHours());
+    }
+
+    @Test
+    public void shouldSetPerBuildMetricsMaxAgeInHoursToZeroForNegativeValues() {
+        // given
+        Mockito.doCallRealMethod().when(configuration).setPerBuildMetricsMaxAgeInHours(Mockito.anyLong());
+        Mockito.when(configuration.getPerBuildMetricsMaxAgeInHours()).thenCallRealMethod();
+
+        // when
+        configuration.setPerBuildMetricsMaxAgeInHours(-1L);
+
+        // then
+        assertEquals(0L, configuration.getPerBuildMetricsMaxAgeInHours());
+    }
+
+    @Test
+    public void shouldSetPerBuildMetricsMaxBuilds() {
+        // given
+        Mockito.doCallRealMethod().when(configuration).setPerBuildMetricsMaxBuilds(Mockito.anyInt());
+        Mockito.when(configuration.getPerBuildMetricsMaxBuilds()).thenCallRealMethod();
+
+        // when
+        configuration.setPerBuildMetricsMaxBuilds(10);
+
+        // then
+        assertEquals(10, configuration.getPerBuildMetricsMaxBuilds());
+    }
+
+    @Test
+    public void shouldSetPerBuildMetricsMaxBuildsToZeroForNegativeValues() {
+        // given
+        Mockito.doCallRealMethod().when(configuration).setPerBuildMetricsMaxBuilds(Mockito.anyInt());
+        Mockito.when(configuration.getPerBuildMetricsMaxBuilds()).thenCallRealMethod();
+
+        // when
+        configuration.setPerBuildMetricsMaxBuilds(-5);
+
+        // then
+        assertEquals(0, configuration.getPerBuildMetricsMaxBuilds());
     }
 
 }

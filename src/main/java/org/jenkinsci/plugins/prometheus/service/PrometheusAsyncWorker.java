@@ -1,6 +1,5 @@
 package org.jenkinsci.plugins.prometheus.service;
 
-import com.google.inject.Inject;
 import hudson.Extension;
 import hudson.model.AsyncPeriodicWork;
 import hudson.model.TaskListener;
@@ -16,15 +15,10 @@ public class PrometheusAsyncWorker extends AsyncPeriodicWork {
 
     private static final Logger logger = LoggerFactory.getLogger(PrometheusAsyncWorker.class);
 
-    private PrometheusMetrics prometheusMetrics;
+    private final PrometheusMetrics prometheusMetrics = DefaultPrometheusMetrics.get();
 
     public PrometheusAsyncWorker() {
         super("prometheus_async_worker");
-    }
-
-    @Inject
-    public void setPrometheusMetrics(PrometheusMetrics prometheusMetrics) {
-        this.prometheusMetrics = prometheusMetrics;
     }
 
     @Override
@@ -41,7 +35,7 @@ public class PrometheusAsyncWorker extends AsyncPeriodicWork {
         prometheusMetrics.collectMetrics();
         logger.debug("Prometheus metrics collected successfully");
     }
-    
+
     @Override
     protected Level getNormalLoggingLevel() {
         return Level.FINE;

@@ -1,21 +1,36 @@
 # Jenkins Prometheus Metrics Plugin
 
+[![Coverage](https://ci.jenkins.io/job/Plugins/job/prometheus-plugin/job/master/badge/icon?status=${instructionCoverage}&subject=coverage&color=${colorInstructionCoverage})](https://ci.jenkins.io/job/Plugins/job/prometheus-plugin/job/master)
+[![LOC](https://ci.jenkins.io/job/Plugins/job/prometheus-plugin/job/master/badge/icon?job=test&status=${lineOfCode}&subject=line%20of%20code&color=blue)](https://ci.jenkins.io/job/Plugins/job/prometheus-plugin/job/master)
+[![Jenkins Plugin Installs](https://img.shields.io/jenkins/plugin/i/prometheus.svg?color=blue)](https://plugins.jenkins.io/prometheus)
+
+
 ## About
-Jenkins Prometheus Plugin expose an endpoint (default `/prometheus`) with metrics where a Prometheus Server can scrape.
+Jenkins Prometheus Plugin expose an endpoint (default `/prometheus/`) with metrics where a Prometheus Server can scrape.
 
 Documentation can be found [here](https://plugins.jenkins.io/prometheus)
 
 Please note that the documentation is a WIP.
 
 ## Metrics exposed
-Currently only metrics from the [Metrics-plugin](https://github.com/jenkinsci/metrics-plugin) and summary of build
-duration of jobs and pipeline stages
+2 types of metrics are exposed:
+
+- Metrics from [Metrics-plugin](https://github.com/jenkinsci/metrics-plugin)
+- Metrics from this plugin. Refer [Prometheus-plugin](docs/metrics/index.md)
+
+## Scraping the endpoint
+The endpoint you've configured or the default endpoint `/prometheus/` in case you didn't configure an endpoint, needs to 
+end with a trailing slash when you configure the endpoint in your scraping tool. If you miss adding the trailing slash
+you'll get a 302 response with a redirection to the endpoint ending with a slash. Some tools cannot handle this well.
+
+## Configuring the plugin
+You can find some examples in this documentation [Configuring Plugin](docs/configuration/configuration.md)
 
 ## Environment variables
 
 `PROMETHEUS_NAMESPACE` Prefix of metric (Default: `default`).
 
-`PROMETHEUS_ENDPOINT` REST Endpoint (Default: `prometheus`)
+`PROMETHEUS_ENDPOINT` REST Endpoint (Default: `/prometheus/`)
 
 `COLLECTING_METRICS_PERIOD_IN_SECONDS` Async task period in seconds (Default: `120` seconds)
 
@@ -28,9 +43,8 @@ duration of jobs and pipeline stages
     mvn hpi:hpi
 
 ## Author / Maintainer
-[Lars Sjöström](https://github.com/lsjostro)
 
-[Marky Jackson](https://github.com/markyjackson-taulia)
+[Waschndolos](https://github.com/waschndolos)
 
 # Contributing
 Pull requests are welcome. For major changes, please open an issue first to discuss what you would like to change.
@@ -89,9 +103,11 @@ Have a look at CONTRIBUTING.md. There are 3 easy ways to contribute to this proj
 
 Commit and push your changes.
 
+```
 git add -A 
 git commit -m "Your commit message"
 git push --set-upstream origin new-branch
+```
 Create a Pull Request by navigating to your forked repository and clicking the New pull request button on your left-hand side of the page.
 
 Add in a title, edit the PR template, and then press the Create pull request button.

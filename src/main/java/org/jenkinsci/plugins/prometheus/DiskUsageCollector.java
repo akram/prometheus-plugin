@@ -1,76 +1,145 @@
 package org.jenkinsci.plugins.prometheus;
 
+import com.cloudbees.simplediskusage.DiskItem;
+import com.cloudbees.simplediskusage.JobDiskItem;
+import edu.umd.cs.findbugs.annotations.NonNull;
 import io.prometheus.client.Collector;
-import io.prometheus.client.Gauge;
 import jenkins.model.Jenkins;
-import org.jenkinsci.plugins.prometheus.util.ConfigurationUtils;
+import org.jenkinsci.plugins.prometheus.collectors.CollectorFactory;
+import org.jenkinsci.plugins.prometheus.collectors.CollectorType;
+import org.jenkinsci.plugins.prometheus.collectors.MetricCollector;
 import org.jenkinsci.plugins.prometheus.config.PrometheusConfiguration;
-
+import org.jenkinsci.plugins.prometheus.config.disabledmetrics.MetricStatusChecker;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import javax.annotation.Nonnull;
+import java.io.File;
 import java.io.IOException;
+import java.nio.file.FileStore;
+import java.nio.file.Files;
 import java.util.ArrayList;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Optional;
+import java.util.Set;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
 public class DiskUsageCollector extends Collector {
 
-    private static final Logger logger = LoggerFactory.getLogger(DiskUsageCollector.class);
-    private Jenkins jenkins;
-    private Gauge directoryUsageGauge;
-    private Gauge jobUsageGauge;
-    private boolean collectDiskUsage;
+    private static final Logger LOGGER = LoggerFactory.getLogger(DiskUsageCollector.class);
 
-    public DiskUsageCollector() {
-        jenkins = Jenkins.get();
-        this.collectDiskUsage = ConfigurationUtils.getCollectDiskUsage();
+    private final AtomicBoolean missingPluginWarned = new AtomicBoolean(false);
 
-        if(collectDiskUsage) {
-            directoryUsageGauge = Gauge.build()
-                    .namespace(ConfigurationUtils.getNamespace())
-                    .subsystem(ConfigurationUtils.getSubSystem())
-                    .name("disk_usage_bytes")
-                    .labelNames("directory")
-                    .help("Disk usage of first level folder in JENKINS_HOME in bytes")
-                    .create();
-            jobUsageGauge = Gauge.build()
-                    .namespace(ConfigurationUtils.getNamespace())
-                    .subsystem(ConfigurationUtils.getSubSystem())
-                    .name("job_usage_bytes")
-                    .labelNames("jobName", "url")
-                    .help("Amount of disk usage (bytes) for each job in Jenkins")
-                    .create();
+    @Override
+    @NonNull
+    public List<MetricFamilySamples> collect() {
+
+        if (!PrometheusConfiguration.get().getCollectDiskUsage()) {
+            return Collections.emptyList();
+        }
+
+        try {
+            return collectDiskUsage();
+        } catch (final IOException | RuntimeException e) {
+            LOGGER.warn("Failed to get disk usage data due to an unexpected error.", e);
+            return Collections.emptyList();
+        } catch (final NoClassDefFoundError e) {
+            // The class stays unresolvable until restart, so only warn the first time and log at debug afterwards.
+            if (missingPluginWarned.compareAndSet(false, true)) {
+                LOGGER.warn("Cannot collect disk usage data because plugin CloudBees Disk Usage Simple is not installed: {}", e.toString());
+                LOGGER.info("You can remove this warning if you disable Collect Disk Usage in Prometheus Configuration. This message is logged only once.");
+            } else {
+                LOGGER.debug("Cannot collect disk usage data because plugin CloudBees Disk Usage Simple is not installed: {}", e.toString());
+            }
+            return Collections.emptyList();
         }
     }
 
-    @Override
-    @Nonnull
-    public List<MetricFamilySamples> collect() {
-        List<MetricFamilySamples> samples = new ArrayList<>();
-        if(!this.collectDiskUsage) { return samples; }
-        try {
-        	com.cloudbees.simplediskusage.QuickDiskUsagePlugin diskUsagePlugin = jenkins.getPlugin(com.cloudbees.simplediskusage.QuickDiskUsagePlugin.class);
-            if (diskUsagePlugin == null) {
-                logger.warn("Cannot collect disk usage data because plugin CloudBees Disk Usage Simple is not installed.");
-                return samples;
-            }
-            diskUsagePlugin.getDirectoriesUsages().forEach(
-                    i -> directoryUsageGauge.labels(i.getDisplayName())
-                            .set(i.getUsage() * 1024)
-            );
-            samples.addAll(directoryUsageGauge.collect());
+    boolean isMissingPluginWarningLogged() {
+        return missingPluginWarned.get();
+    }
 
-            diskUsagePlugin.getJobsUsages().forEach(
-                    i -> jobUsageGauge.labels(i.getFullName(), i.getUrl())
-                            .set(i.getUsage() * 1024)
-            );
-            samples.addAll(jobUsageGauge.collect());
-        } catch (IOException e) {
-            logger.warn("Cannot get disk usage data due to an unexpected error", e);
-        } catch (java.lang.NoClassDefFoundError e) {
-        	logger.warn("Cannot get disk usage data. Install CloudBees Disk Usage Simple plugin to enable");
+    @NonNull
+    private static List<MetricFamilySamples> collectDiskUsage() throws IOException {
+        final com.cloudbees.simplediskusage.QuickDiskUsagePlugin diskUsagePlugin = Jenkins.get()
+                .getPlugin(com.cloudbees.simplediskusage.QuickDiskUsagePlugin.class);
+        if (diskUsagePlugin == null) {
+            return Collections.emptyList();
         }
+
+        CollectorFactory factory = new CollectorFactory();
+        final Set<FileStore> usedFileStores = new HashSet<>();
+        List<MetricCollector<DiskItem, ? extends Collector>> diskItemCollectors = new ArrayList<>();
+        diskItemCollectors.add(factory.createDiskItemCollector(CollectorType.DISK_USAGE_BYTES_GAUGE, new String[]{"file_store", "directory"}));
+        diskItemCollectors.add(factory.createDiskItemCollector(CollectorType.DISK_USAGE_FILE_COUNT_GAUGE, new String[]{"file_store", "directory"}));
+
+        diskUsagePlugin.getDirectoriesUsages().forEach(i -> {
+            final Optional<FileStore> fileStore = getFileStore(i.getPath());
+            fileStore.ifPresent(usedFileStores::add);
+            diskItemCollectors.forEach(c -> c.calculateMetric(i, new String[]{toLabelValue(fileStore), i.getDisplayName()}));
+        });
+
+        List<MetricCollector<JobDiskItem, ? extends Collector>> jobDiskItemCollectors = new ArrayList<>();
+        jobDiskItemCollectors.add(factory.createJobDiskItemCollector(CollectorType.JOB_USAGE_BYTES_GAUGE, new String[]{"file_store", "jobName", "url"}));
+
+        diskUsagePlugin.getJobsUsages().forEach(i -> {
+            if (!MetricStatusChecker.isJobEnabled(i.getFullName())) {
+                return;
+            }
+            final Optional<FileStore> fileStore = getFileStore(i.getPath());
+            fileStore.ifPresent(usedFileStores::add);
+            jobDiskItemCollectors.forEach(c -> c.calculateMetric(i, new String[]{toLabelValue(fileStore), i.getFullName(), i.getUrl()}));
+        });
+
+        List<MetricCollector<FileStore, ? extends Collector>> fileStoreCollectors = new ArrayList<>();
+        fileStoreCollectors.add(factory.createFileStoreCollector(CollectorType.FILE_STORE_CAPACITY_GAUGE, new String[]{"file_store"}));
+        fileStoreCollectors.add(factory.createFileStoreCollector(CollectorType.FILE_STORE_AVAILABLE_GAUGE, new String[]{"file_store"}));
+
+        usedFileStores.forEach(store -> {
+            final String labelValue = toLabelValue(Optional.of(store));
+            fileStoreCollectors.forEach(c -> c.calculateMetric(store, new String[]{labelValue}));
+        });
+
+        List<MetricFamilySamples> samples = new ArrayList<>();
+
+        samples.addAll(Stream.of(diskItemCollectors)
+                .flatMap(Collection::stream)
+                .map(MetricCollector::collect)
+                .flatMap(Collection::stream)
+                .collect(Collectors.toList()));
+
+        samples.addAll(Stream.of(jobDiskItemCollectors)
+                .flatMap(Collection::stream)
+                .map(MetricCollector::collect)
+                .flatMap(Collection::stream)
+                .collect(Collectors.toList()));
+
+        samples.addAll(Stream.of(fileStoreCollectors)
+                .flatMap(Collection::stream)
+                .map(MetricCollector::collect)
+                .flatMap(Collection::stream)
+                .collect(Collectors.toList()));
+
         return samples;
+    }
+
+    private static String toLabelValue(Optional<FileStore> fileStore) {
+        // At least on Linux, FileStore::name is not unique, whereas FileStore::toString includes the mount point, which
+        // makes it unique. So it's possible to have duplicate metrics with different label values for the same file
+        // store mounted to different paths.
+        return fileStore.map(FileStore::toString).orElse("<unknown>");
+    }
+
+    private static Optional<FileStore> getFileStore(File file) {
+        try {
+            return Optional.of(Files.getFileStore(file.toPath().toRealPath()));
+        } catch (IOException | RuntimeException e) {
+            LOGGER.debug("Failed to get file store for {}", file, e);
+            return Optional.empty();
+        }
     }
 }

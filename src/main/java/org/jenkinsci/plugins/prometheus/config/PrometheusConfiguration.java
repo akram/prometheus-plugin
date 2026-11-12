@@ -1,16 +1,17 @@
 package org.jenkinsci.plugins.prometheus.config;
 
+import edu.umd.cs.findbugs.annotations.CheckForNull;
 import hudson.Extension;
-import hudson.model.Descriptor;
 import hudson.util.FormValidation;
 import jenkins.YesNoMaybe;
 import jenkins.model.GlobalConfiguration;
 import jenkins.model.Jenkins;
-import net.sf.json.JSONException;
 import net.sf.json.JSONObject;
-import org.apache.commons.lang.StringUtils;
+import org.apache.commons.lang3.StringUtils;
+import org.jenkinsci.plugins.prometheus.config.disabledmetrics.DisabledMetricConfig;
+import org.kohsuke.stapler.DataBoundSetter;
 import org.kohsuke.stapler.QueryParameter;
-import org.kohsuke.stapler.StaplerRequest;
+import org.kohsuke.stapler.StaplerRequest2;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -32,15 +33,14 @@ public class PrometheusConfiguration extends GlobalConfiguration {
     private static final String DEFAULT_ENDPOINT = "prometheus";
     static final String COLLECTING_METRICS_PERIOD_IN_SECONDS = "COLLECTING_METRICS_PERIOD_IN_SECONDS";
     static final long DEFAULT_COLLECTING_METRICS_PERIOD_IN_SECONDS = TimeUnit.MINUTES.toSeconds(2);
-    private static final String COLLECT_DISK_USAGE = "COLLECT_DISK_USAGE";
-    static final boolean DEFAULT_COLLECT_DISK_USAGE = true;
+    static final String COLLECT_DISK_USAGE = "COLLECT_DISK_USAGE";
 
     private String urlName = null;
     private String additionalPath;
     private String defaultNamespace = "default";
     private String jobAttributeName = "jenkins_job";
     private boolean useAuthenticatedEndpoint;
-    private Long collectingMetricsPeriodInSeconds = null;
+    private long collectingMetricsPeriodInSeconds = -1L;
 
     private boolean countSuccessfulBuilds = true;
     private boolean countUnstableBuilds = true;
@@ -53,53 +53,47 @@ public class PrometheusConfiguration extends GlobalConfiguration {
 
     private boolean appendParamLabel = false;
     private boolean appendStatusLabel = false;
+    private boolean perBuildMetrics = false;
+    private long perBuildMetricsMaxAgeInHours = 0L; // 0 means no limit
+    private int perBuildMetricsMaxBuilds = 0; // 0 means no limit
 
+
+    private transient boolean collectDiskUsageEnvironmentVariableSet = false;
 
     private String labeledBuildParameterNames = "";
 
     private boolean collectDiskUsage = true;
+    private boolean collectCodeCoverage = false;
+    private boolean collectNodeStatus = true;
+
+    @CheckForNull
+    private DisabledMetricConfig disabledMetricConfig;
 
 
     public PrometheusConfiguration() {
         load();
-        setPath(urlName);
+        setPath(getPath());
         setCollectingMetricsPeriodInSeconds(collectingMetricsPeriodInSeconds);
-        setCollectDiskUsage(null);
+        setCollectDiskUsageBasedOnEnvironmentVariableIfDefined();
     }
 
     public static PrometheusConfiguration get() {
-        Descriptor configuration = Jenkins.getInstance().getDescriptor(PrometheusConfiguration.class);
-        return (PrometheusConfiguration) configuration;
+        return (PrometheusConfiguration) Jenkins.get().getDescriptor(PrometheusConfiguration.class);
     }
 
     @Override
-    public boolean configure(StaplerRequest req, JSONObject json) throws FormException {
-        setPath(json.getString("path"));
-        setCollectDiskUsage(json.getBoolean("collectDiskUsage"));
-        useAuthenticatedEndpoint = json.getBoolean("useAuthenticatedEndpoint");
-        defaultNamespace = json.getString("defaultNamespace");
-        jobAttributeName = json.getString("jobAttributeName");
-        countSuccessfulBuilds = json.getBoolean("countSuccessfulBuilds");
-        countUnstableBuilds = json.getBoolean("countUnstableBuilds");
-        countFailedBuilds = json.getBoolean("countFailedBuilds");
-        countNotBuiltBuilds = json.getBoolean("countNotBuiltBuilds");
-        countAbortedBuilds = json.getBoolean("countAbortedBuilds");
-        fetchTestResults = json.getBoolean("fetchTestResults");
-        collectingMetricsPeriodInSeconds = validateProcessingMetricsPeriodInSeconds(json);
-        processingDisabledBuilds = json.getBoolean("processingDisabledBuilds");
-        appendParamLabel = json.getBoolean("appendParamLabel");
-        appendStatusLabel = json.getBoolean("appendStatusLabel");
-
-      labeledBuildParameterNames = json.getString("labeledBuildParameterNames");
-
+    public boolean configure(StaplerRequest2 req, JSONObject json) {
+        disabledMetricConfig = null;
+        req.bindJSON(this, json);
         save();
-        return super.configure(req, json);
+        return true;
     }
 
     public String getPath() {
-        return StringUtils.isEmpty(additionalPath) ? urlName : urlName + "/" + additionalPath;
+        return StringUtils.isEmpty(additionalPath) ? urlName : urlName + additionalPath;
     }
 
+    @DataBoundSetter
     public void setPath(String path) {
         if (path == null) {
             Map<String, String> env = System.getenv();
@@ -108,146 +102,207 @@ public class PrometheusConfiguration extends GlobalConfiguration {
         urlName = path.split("/")[0];
         List<String> pathParts = Arrays.asList(path.split("/"));
         additionalPath = (pathParts.size() > 1 ? "/" : "") + StringUtils.join(pathParts.subList(1, pathParts.size()), "/");
-        save();
     }
 
     public String getJobAttributeName() {
         return jobAttributeName;
     }
 
+    @DataBoundSetter
     public void setJobAttributeName(String jobAttributeName) {
         this.jobAttributeName = jobAttributeName;
-        save();
     }
 
     public String getDefaultNamespace() {
         return defaultNamespace;
     }
 
+    @DataBoundSetter
     public void setDefaultNamespace(String path) {
         this.defaultNamespace = path;
-        save();
     }
 
-    public void setCollectDiskUsage(Boolean collectDiskUsage) {
-        if (collectDiskUsage == null) {
-            Map<String, String> env = System.getenv();
-            this.collectDiskUsage = Boolean.parseBoolean(env.getOrDefault(COLLECT_DISK_USAGE, "true"));
-        }
-        else {
-            this.collectDiskUsage = collectDiskUsage;
-        }
+    @DataBoundSetter
+    public void setCollectDiskUsage(boolean collectDiskUsage) {
+        this.collectDiskUsage = collectDiskUsage;
+    }
 
-        save();
+    public void setCollectDiskUsageBasedOnEnvironmentVariableIfDefined() {
+        try {
+            final String envValue = System.getenv(COLLECT_DISK_USAGE);
+            if (envValue != null) {
+                setCollectDiskUsage(getValidBooleanValueOrThrowException(envValue));
+                collectDiskUsageEnvironmentVariableSet = true;
+            }
+        } catch (IllegalArgumentException e) {
+            logger.warn("Unable to parse environment variable '{}'. Must either be 'true' or 'false'. Ignoring...", COLLECT_DISK_USAGE);
+        }
+    }
+
+    public boolean isCollectDiskUsageEnvironmentVariableSet() {
+        return collectDiskUsageEnvironmentVariableSet;
+    }
+
+    private boolean getValidBooleanValueOrThrowException(String value) throws IllegalArgumentException {
+        if ("true".equalsIgnoreCase(value) || "false".equalsIgnoreCase(value)) {
+            return Boolean.parseBoolean(value);
+        }
+        throw new IllegalArgumentException();
     }
 
     public boolean getCollectDiskUsage() {
         return collectDiskUsage;
     }
 
-    public boolean getDefaultCollectDiskUsage() {return DEFAULT_COLLECT_DISK_USAGE; }
-
     public long getCollectingMetricsPeriodInSeconds() {
         return collectingMetricsPeriodInSeconds;
     }
 
-    public void setCollectingMetricsPeriodInSeconds(Long collectingMetricsPeriodInSeconds) {
-        if (collectingMetricsPeriodInSeconds == null) {
+    @DataBoundSetter
+    public void setCollectingMetricsPeriodInSeconds(long collectingMetricsPeriodInSeconds) {
+        if (collectingMetricsPeriodInSeconds == -1L) {
             this.collectingMetricsPeriodInSeconds = parseLongFromEnv();
         } else {
             this.collectingMetricsPeriodInSeconds = collectingMetricsPeriodInSeconds;
         }
-        save();
     }
 
     public boolean isUseAuthenticatedEndpoint() {
         return useAuthenticatedEndpoint;
     }
 
+    @DataBoundSetter
     public void setUseAuthenticatedEndpoint(boolean useAuthenticatedEndpoint) {
         this.useAuthenticatedEndpoint = useAuthenticatedEndpoint;
-        save();
     }
 
     public boolean isCountSuccessfulBuilds() {
         return countSuccessfulBuilds;
     }
 
+    @DataBoundSetter
     public void setCountSuccessfulBuilds(boolean countSuccessfulBuilds) {
         this.countSuccessfulBuilds = countSuccessfulBuilds;
-        save();
     }
 
     public boolean isCountUnstableBuilds() {
         return countUnstableBuilds;
     }
 
+    @DataBoundSetter
     public void setCountUnstableBuilds(boolean countUnstableBuilds) {
         this.countUnstableBuilds = countUnstableBuilds;
-        save();
     }
 
     public boolean isCountFailedBuilds() {
         return countFailedBuilds;
     }
 
+    @DataBoundSetter
     public void setCountFailedBuilds(boolean countFailedBuilds) {
         this.countFailedBuilds = countFailedBuilds;
-        save();
     }
 
     public boolean isCountNotBuiltBuilds() {
         return countNotBuiltBuilds;
     }
 
+    @DataBoundSetter
     public void setCountNotBuiltBuilds(boolean countNotBuiltBuilds) {
         this.countNotBuiltBuilds = countNotBuiltBuilds;
-        save();
     }
 
     public boolean isCountAbortedBuilds() {
         return countAbortedBuilds;
     }
 
+    @DataBoundSetter
     public void setCountAbortedBuilds(boolean countAbortedBuilds) {
         this.countAbortedBuilds = countAbortedBuilds;
-        save();
     }
 
     public boolean isFetchTestResults() {
         return fetchTestResults;
     }
 
+    @DataBoundSetter
     public void setFetchTestResults(boolean fetchTestResults) {
         this.fetchTestResults = fetchTestResults;
-        save();
     }
 
     public boolean isProcessingDisabledBuilds() {
         return processingDisabledBuilds;
     }
 
+    @DataBoundSetter
     public void setProcessingDisabledBuilds(boolean processingDisabledBuilds) {
         this.processingDisabledBuilds = processingDisabledBuilds;
-        save();
     }
 
     public boolean isAppendParamLabel() {
         return appendParamLabel;
     }
 
+    @DataBoundSetter
     public void setAppendParamLabel(boolean appendParamLabel) {
         this.appendParamLabel = appendParamLabel;
-        save();
     }
 
     public boolean isAppendStatusLabel() {
         return appendStatusLabel;
     }
 
+    @DataBoundSetter
     public void setAppendStatusLabel(boolean appendStatusLabel) {
         this.appendStatusLabel = appendStatusLabel;
-        save();
+    }
+
+    public boolean isPerBuildMetrics() {
+        return perBuildMetrics;
+    }
+
+    @DataBoundSetter
+    public void setPerBuildMetrics(boolean perBuildMetrics) {
+        this.perBuildMetrics = perBuildMetrics;
+    }
+
+    /**
+     * Gets the maximum age in hours for per-build metrics.
+     * Runs older than this value will not be included in per-build metrics.
+     * A value of 0 means no age limit.
+     * @return the maximum age in hours, or 0 for no limit
+     */
+    public long getPerBuildMetricsMaxAgeInHours() {
+        return perBuildMetricsMaxAgeInHours;
+    }
+
+    @DataBoundSetter
+    public void setPerBuildMetricsMaxAgeInHours(long perBuildMetricsMaxAgeInHours) {
+        this.perBuildMetricsMaxAgeInHours = Math.max(0, perBuildMetricsMaxAgeInHours);
+    }
+
+    /**
+     * Gets the maximum number of builds to include in per-build metrics per job.
+     * Only the latest N builds will be included.
+     * A value of 0 means no count limit.
+     * @return the maximum number of builds, or 0 for no limit
+     */
+    public int getPerBuildMetricsMaxBuilds() {
+        return perBuildMetricsMaxBuilds;
+    }
+
+    @DataBoundSetter
+    public void setPerBuildMetricsMaxBuilds(int perBuildMetricsMaxBuilds) {
+        this.perBuildMetricsMaxBuilds = Math.max(0, perBuildMetricsMaxBuilds);
+    }
+
+    public boolean isCollectNodeStatus() {
+        return collectNodeStatus;
+    }
+
+    @DataBoundSetter
+    public void setCollectNodeStatus(boolean collectNodeStatus) {
+        this.collectNodeStatus = collectNodeStatus;
     }
 
     public String getUrlName() {
@@ -262,6 +317,7 @@ public class PrometheusConfiguration extends GlobalConfiguration {
         return labeledBuildParameterNames;
     }
 
+    @DataBoundSetter
     public void setLabeledBuildParameterNames(String labeledBuildParameterNames) {
         this.labeledBuildParameterNames = labeledBuildParameterNames;
     }
@@ -270,6 +326,26 @@ public class PrometheusConfiguration extends GlobalConfiguration {
         return parseParameterNamesFromStringSeparatedByComma(labeledBuildParameterNames);
     }
 
+    public DisabledMetricConfig getDisabledMetricConfig() {
+        return disabledMetricConfig;
+    }
+
+    @DataBoundSetter
+    public void setDisabledMetricConfig(DisabledMetricConfig disabledMetricConfig) {
+        this.disabledMetricConfig = disabledMetricConfig;
+    }
+
+    public boolean isCollectCodeCoverage() {
+        return collectCodeCoverage;
+    }
+
+    public boolean isCodeCoverageApiPluginInstalled() {
+        return Jenkins.get().getPlugin("code-coverage-api") != null;
+    }
+
+    public void setCollectCodeCoverage(boolean collectCodeCoverage) {
+        this.collectCodeCoverage = collectCodeCoverage;
+    }
 
     public FormValidation doCheckPath(@QueryParameter String value) {
         if (StringUtils.isEmpty(value)) {
@@ -281,15 +357,16 @@ public class PrometheusConfiguration extends GlobalConfiguration {
         }
     }
 
-    private Long validateProcessingMetricsPeriodInSeconds(JSONObject json) throws FormException {
+    public FormValidation doCheckCollectingMetricsPeriodInSeconds(@QueryParameter String value) {
         try {
-            long value = json.getLong("collectingMetricsPeriodInSeconds");
-            if (value > 0) {
-                return value;
+            long longValue = Long.parseLong(value);
+            if (longValue > 0) {
+                return FormValidation.ok();
             }
-        } catch (JSONException ignored) {
+        } catch (NumberFormatException ignore) {
+            // ignore exception. If it comes it's not a positive long
         }
-        throw new FormException("CollectingMetricsPeriodInSeconds must be a positive integer", "collectingMetricsPeriodInSeconds");
+        return FormValidation.error("CollectingMetricsPeriodInSeconds must be a positive value");
     }
 
     private long parseLongFromEnv() {
@@ -310,10 +387,9 @@ public class PrometheusConfiguration extends GlobalConfiguration {
     }
 
     private String[] parseParameterNamesFromStringSeparatedByComma(String stringValue) {
-        if (stringValue==null || stringValue.trim().length() < 1) {
-            return new String[] {};
+        if (stringValue == null || stringValue.trim().isEmpty()) {
+            return new String[]{};
         }
         return stringValue.split("\\s*,\\s*");
     }
-
 }
